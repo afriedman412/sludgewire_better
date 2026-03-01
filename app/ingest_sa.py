@@ -15,17 +15,20 @@ from typing import Optional
 
 from sqlmodel import Session, select
 from sqlalchemy import exists
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .fec_parse import (
     download_fec_text, parse_fec_filing,
     extract_schedule_a_best_effort, sha256_hex, FileTooLargeError,
 )
 from .repo import (
-    claim_filing, update_filing_status, insert_sa_event,
+    claim_filing, update_filing_status,
     get_sa_target_committee_ids, get_pac_groups, get_max_new_per_run,
     record_skipped_filing,
 )
 from .schemas import FilingF3X, IngestionTask, ScheduleA
+
+BATCH_SIZE = 500
 
 MAX_FILE_SIZE_MB = 50
 
@@ -63,6 +66,17 @@ def _record_failure(session: Session, filing_id: int, failed_step: str, error_me
         error_message=error_message,
     ))
     session.commit()
+
+
+def _flush_batch(session: Session, batch: list[dict]) -> int:
+    """Bulk insert SA events, skipping duplicates. Returns count inserted."""
+    if not batch:
+        return 0
+    stmt = pg_insert(ScheduleA).values(batch)
+    stmt = stmt.on_conflict_do_nothing(index_elements=["event_id"])
+    result = session.execute(stmt)
+    session.flush()
+    return result.rowcount
 
 
 def run_sa(
@@ -161,11 +175,11 @@ def run_sa(
             _log_mem(f"after_parse_{filing_id}")
 
             events_this_filing = 0
+            batch = []
             for raw_line, fields in extract_schedule_a_best_effort(
                     fec_text, parsed=parsed):
                 event_id = sha256_hex(f"{filing_id}|{raw_line}")
-
-                event = ScheduleA(
+                batch.append(dict(
                     event_id=event_id,
                     filing_id=filing_id,
                     committee_id=filing.committee_id,
@@ -176,19 +190,27 @@ def run_sa(
                     coverage_through=filing.coverage_through,
                     filed_at_utc=filing.filed_at_utc,
                     contributor_name=fields["contributor_name"],
-                    contributor_employer=fields["contributor_employer"],
-                    contributor_occupation=fields["contributor_occupation"],
-                    contribution_amount=fields["contribution_amount"],
+                    contributor_employer=fields[
+                        "contributor_employer"],
+                    contributor_occupation=fields[
+                        "contributor_occupation"],
+                    contribution_amount=fields[
+                        "contribution_amount"],
                     contribution_date=fields["contribution_date"],
-                    receipt_description=fields["receipt_description"],
+                    receipt_description=fields[
+                        "receipt_description"],
                     contributor_type=fields["contributor_type"],
                     memo_text=fields["memo_text"],
                     fec_url=filing.fec_url,
                     raw_line=raw_line[:200],
-                )
-
-                if insert_sa_event(session, event):
-                    events_this_filing += 1
+                ))
+                if len(batch) >= BATCH_SIZE:
+                    events_this_filing += _flush_batch(
+                        session, batch)
+                    batch = []
+            if batch:
+                events_this_filing += _flush_batch(
+                    session, batch)
 
             update_filing_status(session, filing_id, "SA", "ingested")
             result.events_inserted += events_this_filing
