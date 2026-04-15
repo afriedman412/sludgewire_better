@@ -15,7 +15,6 @@ from sqlmodel import Session
 from app.api import USER_BUMP_PRIORITY, app, get_session
 from app.repo import enqueue_sa_sb_task, insert_sb_event, upsert_f3x
 from app.schemas import (
-    AppConfig,
     FilingF3X,
     IngestionTask,
     ScheduleA,
@@ -253,13 +252,19 @@ class TestDashboardWiring:
 
         r = client.get("/dashboard/3x?threshold=0")
         assert r.status_code == 200
-        assert "LOADING" in r.text
+        # Hourglass icon marks the in-flight status on the link
+        assert "⏳" in r.text
+        assert 'title="SA/SB worker is processing this filing"' in r.text
 
-    def test_no_task_row_shows_plain_amount(self, session, client):
+    def test_no_task_row_still_renders_link(self, session, client):
+        """Every filing with a receipts amount gets a clickable link.
+        The detail page handles enqueue-on-first-access for filings
+        that don't yet have SA_SB data."""
         self._make_today(session, 1003)
         # No SA_SB task enqueued at all
         r = client.get("/dashboard/3x?threshold=0")
         assert r.status_code == 200
-        # Amount visible but not as a link to /filing/.../donors
-        assert '/filing/1003/donors' not in r.text
+        assert '/filing/1003/donors' in r.text
         assert "$75,000.00" in r.text
+        # No LOADING badge since the task hasn't been enqueued yet
+        assert "⏳" not in r.text
