@@ -68,6 +68,7 @@
             <th>Report</th>
             <th>Coverage</th>
             <th>Total receipts</th>
+            <th>Total disbursements</th>
             <th>Raw</th>
         </tr>
     </thead>
@@ -82,6 +83,7 @@
             <td>{{ r.report_type }}</td>
             <td>{{ r.coverage_from }} → {{ r.coverage_through }}</td>
             <td class="money">{% if r.total_receipts is not none %}${{ "{:,.2f}".format(r.total_receipts) }}{% else %}N/A{% endif %}</td>
+            <td class="money">{% if r.total_disbursements is not none %}${{ "{:,.2f}".format(r.total_disbursements) }}{% else %}N/A{% endif %}</td>
             <td>
                 <a href="{{ r.fec_url }}" target="_blank" rel="noreferrer">.fec</a>
             </td>
@@ -89,7 +91,7 @@
         {% endfor %}
         {% else %}
         <tr>
-            <td colspan="8">No filings found.</td>
+            <td colspan="9">No filings found.</td>
         </tr>
         {% endif %}
     </tbody>

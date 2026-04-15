@@ -64,3 +64,15 @@ format:
 
 guni:
 	gunicorn -w 4 -b 0.0.0.0:5000 app:app
+
+.PHONY: proxy dev
+
+# Launch the Cloud SQL proxy for local development (foregrounded).
+# Ctrl-C to stop. App connects via POSTGRES_URL on port 5433.
+proxy:
+	cloud-sql-proxy freeway2026:us-central1:fec-db --port 5433
+
+# Run the FastAPI app locally with auto-reload. Requires the proxy
+# to be running in a separate terminal (`make proxy`).
+dev:
+	. $(VENV_PATH); uvicorn app.main:app --reload --port 8080

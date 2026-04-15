@@ -112,7 +112,8 @@ def backfill_date_f3x(session: Session, target_date: date) -> BackfillJob:
                     # If we can't download, still record basic info from API
                     pass
 
-                total = parsed.get("filing", {}).get("col_a_total_receipts")
+                filing_fields = parsed.get("filing", {})
+                total = filing_fields.get("col_a_total_receipts")
                 if total not in (None, ""):
                     try:
                         total = float(total)
@@ -121,6 +122,15 @@ def backfill_date_f3x(session: Session, target_date: date) -> BackfillJob:
                 else:
                     # Fallback to API data
                     total = filing.get("total_receipts")
+
+                total_disb = filing_fields.get("col_a_total_disbursements")
+                if total_disb not in (None, ""):
+                    try:
+                        total_disb = float(total_disb)
+                    except (TypeError, ValueError):
+                        total_disb = None
+                else:
+                    total_disb = filing.get("total_disbursements")
 
                 threshold_flag = (total is not None and total >= settings.receipts_threshold)
 
@@ -163,6 +173,7 @@ def backfill_date_f3x(session: Session, target_date: date) -> BackfillJob:
                     filed_at_utc=filed_at_utc,
                     fec_url=fec_url,
                     total_receipts=total,
+                    total_disbursements=total_disb,
                     threshold_flag=threshold_flag,
                     raw_meta=filing,
                 )

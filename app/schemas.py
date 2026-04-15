@@ -65,6 +65,10 @@ class IngestionTask(SQLModel, table=True):
     # Email tracking (completes the pipeline: ingested → emailed)
     emailed_at: Optional[datetime] = Field(default=None)
 
+    # Queue priority (higher = processed first). Used by the SA_SB worker.
+    # Default 0; user-triggered bumps write a larger value.
+    priority: int = Field(default=0, index=True)
+
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -86,6 +90,7 @@ class FilingF3X(SQLModel, table=True):
     fec_url: str = Field(sa_column=Column(Text, nullable=False))
 
     total_receipts: Optional[float] = None
+    total_disbursements: Optional[float] = None
     threshold_flag: bool = Field(default=False, index=True)
 
     raw_meta: Optional[Dict[str, Any]] = Field(
@@ -160,6 +165,45 @@ class ScheduleA(SQLModel, table=True):
     receipt_description: Optional[str] = None
     contributor_type: Optional[str] = None    # entity_type: IND, ORG, COM
     memo_text: Optional[str] = None
+
+    fec_url: Optional[str] = None
+    raw_line: str = Field(sa_column=Column(Text, nullable=False))
+
+    first_seen_utc: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ScheduleB(SQLModel, table=True):
+    __tablename__ = "schedule_b"
+
+    event_id: str = Field(primary_key=True)  # SHA256("{filing_id}|{raw_line}")
+
+    filing_id: int = Field(sa_column=Column(
+        BigInteger, index=True, nullable=False))
+    committee_id: str = Field(index=True)
+    committee_name: Optional[str] = Field(default=None)
+    form_type: Optional[str] = None
+    report_type: Optional[str] = None
+
+    coverage_from: Optional[date] = None
+    coverage_through: Optional[date] = None
+    filed_at_utc: Optional[datetime] = Field(default=None, index=True)
+
+    # Payee / recipient fields
+    payee_name: Optional[str] = Field(default=None, index=True)
+    payee_employer: Optional[str] = None
+    payee_occupation: Optional[str] = None
+    disbursement_amount: Optional[float] = Field(default=None, index=True)
+    disbursement_date: Optional[date] = Field(default=None, index=True)
+    disbursement_description: Optional[str] = None
+    payee_type: Optional[str] = None  # entity_type: IND, ORG, COM, PAC, CCM
+    purpose: Optional[str] = None
+    category_code: Optional[str] = None
+    memo_text: Optional[str] = None
+
+    # If this disbursement is attributed to a candidate (e.g. contribution
+    # to a candidate's committee), store the linkage.
+    beneficiary_candidate_id: Optional[str] = Field(default=None, index=True)
+    beneficiary_candidate_name: Optional[str] = None
 
     fec_url: Optional[str] = None
     raw_line: str = Field(sa_column=Column(Text, nullable=False))
