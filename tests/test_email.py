@@ -281,3 +281,108 @@ class TestSendFilingAlert:
         # Verify subject mentions Schedule E
         call_args = mock_send.call_args
         assert "Schedule E" in call_args[0][1]
+
+
+# -------------------------------------------------------
+# SA/SB attention alert
+# -------------------------------------------------------
+
+class TestSaSbAttentionAlert:
+    def _make_filing(self, session, fid, *, committee_id="C00001", name="Test PAC"):
+        from app.repo import upsert_f3x
+        from datetime import date
+        upsert_f3x(
+            session,
+            filing_id=fid,
+            committee_id=committee_id,
+            committee_name=name,
+            form_type="F3XN",
+            report_type="Q1",
+            coverage_from=date(2025, 1, 1),
+            coverage_through=date(2025, 3, 31),
+            filed_at_utc=datetime.now(timezone.utc),
+            fec_url=f"https://ex.com/{fid}.fec",
+            total_receipts=1000.0,
+            total_disbursements=500.0,
+            threshold_flag=False,
+            raw_meta={},
+        )
+        session.commit()
+
+    def test_build_includes_skipped_section(self, session):
+        from app.email_service import build_sa_sb_attention_email
+        self._make_filing(session, 1001, name="Skipped PAC")
+        subject, body = build_sa_sb_attention_email(
+            session, mode="big",
+            skipped_filing_ids=[1001],
+            streamed_filing_ids=[],
+            failed_filing_ids=[],
+        )
+        assert "1 skipped" in subject
+        assert "Skipped PAC" in body
+        assert "Skipped: file too large" in body
+        assert "Streamed:" not in body  # empty section omitted
+
+    def test_build_includes_streamed_section(self, session):
+        from app.email_service import build_sa_sb_attention_email
+        self._make_filing(session, 2001, name="Streamed PAC")
+        subject, body = build_sa_sb_attention_email(
+            session, mode="big",
+            skipped_filing_ids=[],
+            streamed_filing_ids=[2001],
+            failed_filing_ids=[],
+        )
+        assert "1 streamed" in subject
+        assert "Streamed PAC" in body
+        assert "degraded accuracy" in body
+
+    def test_build_includes_failed_section(self, session):
+        from app.email_service import build_sa_sb_attention_email
+        self._make_filing(session, 3001, name="Failed PAC")
+        subject, body = build_sa_sb_attention_email(
+            session, mode="small",
+            skipped_filing_ids=[],
+            streamed_filing_ids=[],
+            failed_filing_ids=[3001],
+        )
+        assert "1 failed" in subject
+        assert "Failed PAC" in body
+
+    def test_no_recipients_returns_empty(self, session):
+        from app.email_service import send_sa_sb_attention_alert
+        # No recipients added
+        result = send_sa_sb_attention_alert(
+            session, mode="big",
+            skipped_filing_ids=[1],
+            streamed_filing_ids=[],
+            failed_filing_ids=[],
+        )
+        assert result == {}
+
+    def test_no_events_returns_empty_without_sending(self, session):
+        from app.email_service import send_sa_sb_attention_alert
+        _add_recipient(session, "a@test.com")
+        # All three lists empty → no work to do
+        result = send_sa_sb_attention_alert(
+            session, mode="big",
+            skipped_filing_ids=[],
+            streamed_filing_ids=[],
+            failed_filing_ids=[],
+        )
+        assert result == {}
+
+    @patch("app.email_service.send_email", return_value=True)
+    def test_send_to_all_recipients(self, mock_send, session):
+        from app.email_service import send_sa_sb_attention_alert
+        self._make_filing(session, 4001)
+        _add_recipient(session, "a@test.com")
+        _add_recipient(session, "b@test.com")
+        result = send_sa_sb_attention_alert(
+            session, mode="big",
+            skipped_filing_ids=[4001],
+            streamed_filing_ids=[],
+            failed_filing_ids=[],
+        )
+        assert result == {"a@test.com": 1, "b@test.com": 1}
+        # Per-recipient send (no committee filtering for ops alerts)
+        assert mock_send.call_count == 2

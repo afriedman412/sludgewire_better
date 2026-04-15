@@ -8,7 +8,7 @@ from typing import List, Optional, Dict
 
 from sqlmodel import Session, select
 
-from .schemas import EmailRecipient
+from .schemas import EmailRecipient, FilingF3X, IngestionTask
 from .settings import load_settings
 
 
@@ -323,4 +323,158 @@ def send_filing_alert(
         if ok:
             sent[recipient.email] = len(filtered)
 
+    return sent
+
+
+def _filing_summary_rows(
+    session: Session, filing_ids: List[int]
+) -> List[dict]:
+    """Look up FilingF3X + SA_SB IngestionTask metadata for an ID list."""
+    if not filing_ids:
+        return []
+    out = []
+    for fid in filing_ids:
+        f = session.get(FilingF3X, fid)
+        t = session.get(IngestionTask, (fid, "SA_SB"))
+        out.append({
+            "filing_id": fid,
+            "committee_id": getattr(f, "committee_id", None),
+            "committee_name": getattr(f, "committee_name", None),
+            "fec_url": getattr(f, "fec_url", None) or getattr(t, "fec_url", None),
+            "file_size_mb": getattr(t, "file_size_mb", None),
+            "error_message": getattr(t, "error_message", None),
+        })
+    return out
+
+
+def _section_html(title: str, intro: str, rows: List[dict]) -> str:
+    if not rows:
+        return ""
+    body_rows = ""
+    for r in rows:
+        cid = r["committee_id"] or ""
+        cname = r["committee_name"] or cid or "Unknown"
+        committee_link = (
+            f'<a href="https://www.fec.gov/data/committee/{cid}/">{cname}</a>'
+            if cid else cname
+        )
+        size_str = (
+            f"{r['file_size_mb']:.1f} MB"
+            if r.get("file_size_mb") is not None else "?"
+        )
+        err = (r.get("error_message") or "").strip()
+        err_html = f'<div style="color:#888;font-size:11px;">{err}</div>' if err else ""
+        fec_url = r.get("fec_url") or "#"
+        body_rows += (
+            "<tr>"
+            f"<td>{r['filing_id']}</td>"
+            f"<td>{committee_link}</td>"
+            f"<td>{size_str}</td>"
+            f"<td><a href=\"{fec_url}\">.fec</a>{err_html}</td>"
+            "</tr>"
+        )
+    return (
+        f"<h3>{title}</h3>"
+        f"<p>{intro}</p>"
+        '<table border="1" cellpadding="6" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:13px;">'
+        "<tr style=\"background:#f6f6f6;\">"
+        "<th>Filing ID</th><th>Committee</th><th>Size</th>"
+        "<th>FEC file</th>"
+        "</tr>"
+        f"{body_rows}"
+        "</table>"
+    )
+
+
+def build_sa_sb_attention_email(
+    session: Session,
+    *,
+    mode: str,
+    skipped_filing_ids: List[int],
+    streamed_filing_ids: List[int],
+    failed_filing_ids: List[int],
+) -> tuple[str, str]:
+    """Build subject + HTML body for SA/SB attention alert. Public so the
+    /config test endpoint can render preview fixtures through the same code."""
+    skipped = _filing_summary_rows(session, skipped_filing_ids)
+    streamed = _filing_summary_rows(session, streamed_filing_ids)
+    failed = _filing_summary_rows(session, failed_filing_ids)
+
+    counts = []
+    if skipped:
+        counts.append(f"{len(skipped)} skipped")
+    if streamed:
+        counts.append(f"{len(streamed)} streamed")
+    if failed:
+        counts.append(f"{len(failed)} failed")
+    summary = ", ".join(counts) if counts else "no events"
+
+    subject = f"FEC SA/SB worker ({mode}): {summary}"
+
+    body_html = (
+        '<html><body style="font-family:-apple-system,system-ui,'
+        'Segoe UI,Roboto,sans-serif;">'
+        f"<h2>SA/SB worker attention — mode={mode}</h2>"
+        + _section_html(
+            "Skipped: file too large",
+            "These filings exceed the hard size cap and were not "
+            "ingested. Manual decision required.",
+            skipped,
+        )
+        + _section_html(
+            "Streamed: degraded accuracy",
+            "These filings exceeded the fecfile threshold and were "
+            "parsed via the streaming fallback. SA/SB amount/date/name "
+            "fields are populated; memo_text, employer, occupation, and "
+            "beneficiary linkage are NULL. Re-ingest manually if you "
+            "need full fidelity.",
+            streamed,
+        )
+        + _section_html(
+            "Failed",
+            "These filings raised an error during processing.",
+            failed,
+        )
+        + '<p style="margin-top:20px;color:#666;font-size:12px;">'
+        "Automated alert from FEC Monitor SA/SB worker."
+        "</p></body></html>"
+    )
+    return subject, body_html
+
+
+def send_sa_sb_attention_alert(
+    session: Session,
+    *,
+    mode: str,
+    skipped_filing_ids: List[int],
+    streamed_filing_ids: List[int],
+    failed_filing_ids: List[int],
+) -> Dict[str, int]:
+    """Send an SA/SB worker attention alert to all active recipients.
+
+    Operational alert — not filtered by per-recipient committee_ids.
+    Returns a {email: 1} dict for each successful send, {} otherwise.
+    """
+    if not (skipped_filing_ids or streamed_filing_ids or failed_filing_ids):
+        return {}
+
+    recipients = get_active_recipients(session)
+    if not recipients:
+        print("No active email recipients for SA/SB attention alert")
+        return {}
+
+    subject, body_html = build_sa_sb_attention_email(
+        session,
+        mode=mode,
+        skipped_filing_ids=skipped_filing_ids,
+        streamed_filing_ids=streamed_filing_ids,
+        failed_filing_ids=failed_filing_ids,
+    )
+
+    sent: Dict[str, int] = {}
+    for recipient in recipients:
+        ok = send_email([recipient.email], subject, body_html)
+        if ok:
+            sent[recipient.email] = 1
     return sent

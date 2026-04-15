@@ -298,19 +298,6 @@ def insert_sa_event(session: Session, event: ScheduleA) -> bool:
         return False
 
 
-def get_sa_target_committee_ids(session: Session) -> list[str]:
-    """Get the list of committee IDs for Schedule A parsing."""
-    config = session.get(AppConfig, "sa_target_committee_ids")
-    if config and config.value:
-        try:
-            ids = json.loads(config.value)
-            if isinstance(ids, list):
-                return [c.strip() for c in ids if isinstance(c, str) and c.strip()]
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return []
-
-
 def get_pac_groups(session: Session) -> list[dict]:
     """Get PAC groups from AppConfig."""
     config = session.get(AppConfig, "pac_groups")

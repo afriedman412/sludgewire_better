@@ -61,7 +61,7 @@ jobs:
             --max-instances 10 \
             --no-cpu-throttling
 
-      - name: Update Cloud Run Job
+      - name: Update Cloud Run Job (light F3X/IE/PTR ingest)
         run: |
           gcloud run jobs update fec-ingest-job \
             --image ${{ env.IMAGE_TAG }} \
@@ -75,6 +75,40 @@ jobs:
             --set-env-vars "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" \
             --add-cloudsql-instances ${{ secrets.CLOUD_SQL_CONNECTION }} \
             --memory 4Gi
+
+      - name: Update Cloud Run Job (SA/SB worker - small)
+        run: |
+          gcloud run jobs update fec-sa-sb-job \
+            --image ${{ env.IMAGE_TAG }} \
+            --region ${{ env.REGION }} \
+            --set-env-vars "MODE=sa_sb_worker" \
+            --set-env-vars "SA_SB_WORKER_MODE=small" \
+            --set-env-vars "POSTGRES_URL=${{ secrets.POSTGRES_URL }}" \
+            --set-env-vars "GOOGLE_APP_PW=${{ secrets.GOOGLE_APP_PW }}" \
+            --set-env-vars "EMAIL_FROM=${{ secrets.EMAIL_FROM }}" \
+            --set-env-vars "GOV_API_KEY=${{ secrets.GOV_API_KEY }}" \
+            --add-cloudsql-instances ${{ secrets.CLOUD_SQL_CONNECTION }} \
+            --memory 8Gi \
+            --cpu 2 \
+            --parallelism 4 \
+            --task-timeout 3600
+
+      - name: Update Cloud Run Job (SA/SB worker - big)
+        run: |
+          gcloud run jobs update fec-sa-sb-job-big \
+            --image ${{ env.IMAGE_TAG }} \
+            --region ${{ env.REGION }} \
+            --set-env-vars "MODE=sa_sb_worker" \
+            --set-env-vars "SA_SB_WORKER_MODE=big" \
+            --set-env-vars "POSTGRES_URL=${{ secrets.POSTGRES_URL }}" \
+            --set-env-vars "GOOGLE_APP_PW=${{ secrets.GOOGLE_APP_PW }}" \
+            --set-env-vars "EMAIL_FROM=${{ secrets.EMAIL_FROM }}" \
+            --set-env-vars "GOV_API_KEY=${{ secrets.GOV_API_KEY }}" \
+            --add-cloudsql-instances ${{ secrets.CLOUD_SQL_CONNECTION }} \
+            --memory 32Gi \
+            --cpu 8 \
+            --parallelism 1 \
+            --task-timeout 7200
 
       - name: Show deployment URL
         run: |

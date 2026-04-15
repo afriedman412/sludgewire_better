@@ -187,6 +187,13 @@
         </div>
     </form>
 
+    <form method="POST" action="/config/test-sa-sb-alert" style="margin-top: 8px;">
+        <div class="form-row">
+            <span style="flex: 0 0 auto; padding: 8px 0;">Test SA/SB worker alert pipeline</span>
+            <button type="submit">Send test alert</button>
+        </div>
+    </form>
+
     <form method="POST" action="/config/settings/max_new_per_run" style="margin-top: 16px;">
         <div class="form-row">
             <label for="max_new_per_run" style="flex: 0 0 auto; padding: 8px 0;">Max filings per run:</label>
@@ -199,26 +206,13 @@
     </form>
 </div>
 
-<h2>Schedule A Tracking</h2>
+<h2>Schedule A / B Manual Parse</h2>
 <div class="config-section">
-    <form method="POST" action="/config/settings/sa_target_committee_ids">
-        <div class="form-row">
-            <label for="sa_target_committee_ids" style="flex: 0 0 auto; padding: 8px 0;">
-                Target PAC Committee IDs:
-            </label>
-        </div>
-        <div class="form-row">
-            <textarea name="committee_ids" id="sa_target_committee_ids"
-                rows="4"
-                style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 0.85em;"
-                placeholder="C00813006, C00401224, ...">{{ sa_target_committee_ids | join(', ') }}</textarea>
-            <button type="submit">Update</button>
-        </div>
-        <p class="muted" style="font-size: 0.85em; margin-top: 8px;">
-            Comma-separated FEC committee IDs. Schedule A items will only be parsed from F3X filings by these committees.
-            Currently tracking {{ sa_target_committee_ids | length }} committee(s).
-        </p>
-    </form>
+    <p class="muted" style="font-size: 0.85em;">
+        Schedule A and B are now ingested automatically by the SA/SB worker
+        for every F3X filing. Use the form below to manually parse a single
+        filing if needed (e.g. retry after a streamed/failed attempt).
+    </p>
 
     <h3 style="margin-top: 24px;">Parse Single Filing</h3>
     <form method="POST" action="/config/parse-sa">
@@ -308,6 +302,89 @@
     </div>
     {% else %}
     <p class="muted">No cron runs recorded yet.</p>
+    {% endif %}
+</div>
+
+<h2>SA/SB Worker</h2>
+<div class="config-section" style="max-width: 900px;">
+    <h3>Latest runs</h3>
+    {% if sa_sb_runs %}
+    <table style="width: 100%; font-size: 13px;">
+        <thead>
+            <tr>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>Filings</th>
+                <th>SA rows</th>
+                <th>SB rows</th>
+                <th>Failed</th>
+                <th>Skipped</th>
+                <th>Streamed</th>
+                <th>Handed off</th>
+                <th>Completed</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for mode, run in sa_sb_runs.items() %}
+            <tr>
+                <td><strong>{{ mode }}</strong></td>
+                <td>{{ run.status }}</td>
+                <td>{{ run.filings_processed | default(0) }}</td>
+                <td>{{ run.sa_inserted | default(0) }}</td>
+                <td>{{ run.sb_inserted | default(0) }}</td>
+                <td>{{ run.failed | default(0) }}</td>
+                <td>{{ run.skipped_too_large | default(0) }}</td>
+                <td>{{ run.streamed | default(0) }}</td>
+                <td>{{ run.handed_off | default(0) }}</td>
+                <td>{% if run.completed_at %}{{ run.completed_at[:19] | replace('T', ' ') }}{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No SA/SB worker runs recorded yet.</p>
+    {% endif %}
+
+    <h3 style="margin-top: 20px;">Recent skipped / failed (50 most recent)</h3>
+    {% if sa_sb_attention_rows %}
+    <table style="width: 100%; font-size: 13px;">
+        <thead>
+            <tr>
+                <th>Filing</th>
+                <th>Committee</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Size</th>
+                <th>When</th>
+                <th>Raw</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in sa_sb_attention_rows %}
+            <tr>
+                <td>{{ r.filing_id }}</td>
+                <td>{{ r.committee_name or '' }}</td>
+                <td>
+                    {% if r.status == 'skipped' %}
+                    <span style="color: #b08800;">SKIPPED</span>
+                    {% else %}
+                    <span style="color: #dc3545;">FAILED</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if r.skip_reason %}{{ r.skip_reason }}{% endif %}
+                    {% if r.failed_step %}<code>{{ r.failed_step }}</code>{% endif %}
+                    {% if r.error_message %}<div class="muted" style="font-size: 11px;">{{ r.error_message[:120] }}</div>{% endif %}
+                </td>
+                <td>{% if r.file_size_mb %}{{ "%.1f"|format(r.file_size_mb) }} MB{% endif %}</td>
+                <td>{{ r.updated_at.strftime('%Y-%m-%d %H:%M') if r.updated_at else '' }}</td>
+                <td>{% if r.fec_url %}<a href="{{ r.fec_url }}" target="_blank" rel="noreferrer">.fec</a>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No skipped or failed SA/SB filings.</p>
     {% endif %}
 </div>
 

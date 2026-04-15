@@ -16,15 +16,21 @@ from sqlmodel import Session, select, col
 
 from .settings import load_settings
 from .db import make_engine, init_db
-from .schemas import FilingF3X, IEScheduleE, EmailRecipient, BackfillJob, AppConfig
+from .schemas import FilingF3X, IEScheduleE, EmailRecipient, BackfillJob, AppConfig, IngestionTask, ScheduleA, ScheduleB
 import json
 from .auth import verify_admin
-from .repo import DEFAULT_MAX_NEW_PER_RUN, get_email_enabled, get_ptr_email_enabled, get_sa_target_committee_ids, get_pac_groups, set_pac_groups
+from .repo import DEFAULT_MAX_NEW_PER_RUN, get_email_enabled, get_ptr_email_enabled, get_pac_groups, set_pac_groups
 
 # --- App + DB bootstrap ---
 settings = load_settings()
 engine = make_engine(settings)
-init_db(engine)
+try:
+    init_db(engine)
+except Exception as _e:  # noqa: BLE001
+    # Don't block import if the DB is unreachable (e.g. during test
+    # collection or local dev without the proxy running). Routes
+    # using get_session() will fail loudly when actually invoked.
+    print(f"[api] init_db skipped: {_e}")
 
 app = FastAPI(title="FEC Monitor", version="0.2.0")
 
@@ -94,6 +100,20 @@ def healthz():
 # Dashboards (HTML)
 # -------------------------
 
+def _sa_sb_status_map(
+    session: Session, filing_ids: list[int]
+) -> dict[int, str]:
+    """Return {filing_id: status} for SA_SB tasks of the given filings.
+    Filings without a task row are absent from the result."""
+    if not filing_ids:
+        return {}
+    rows = session.exec(
+        select(IngestionTask.filing_id, IngestionTask.status)
+        .where(IngestionTask.source_feed == "SA_SB")
+        .where(col(IngestionTask.filing_id).in_(filing_ids))
+    ).all()
+    return {r[0]: r[1] for r in rows}
+
 @app.get("/dashboard/3x", response_class=HTMLResponse)
 def dashboard_3x(
     request: Request,
@@ -117,12 +137,15 @@ def dashboard_3x(
         stmt = stmt.where(FilingF3X.total_receipts >= threshold)
     stmt = stmt.order_by(FilingF3X.filed_at_utc.desc()).limit(limit)
     rows = session.exec(stmt).all()
+    sa_sb_status = _sa_sb_status_map(
+        session, [r.filing_id for r in rows])
 
     return templates.TemplateResponse(
         "dashboard_3x.html",
         {
             "request": request,
             "rows": rows,
+            "sa_sb_status": sa_sb_status,
             "threshold": threshold,
             "day_et": today,
             "prev_date": today - timedelta(days=1),
@@ -172,6 +195,117 @@ def dashboard_e(
             "api_url": f"/api/e/today?limit={limit}",
         },
     )
+
+
+# -------------------------
+# Filing detail pages (donors / recipients)
+# -------------------------
+
+# Priority value used when a user accesses an unfinished detail page.
+# 100x larger than any plausible filing_id (~10^7), so user-bumped rows
+# always sort to the front of the SA/SB worker queue. Sized to fit in
+# Postgres INTEGER (max ~2.1B).
+USER_BUMP_PRIORITY = 1_000_000_000
+
+
+def _render_filing_detail(
+    request: Request,
+    session: Session,
+    filing_id: int,
+    *,
+    kind: str,
+):
+    """Render the donors or recipients detail page for an F3X filing.
+
+    kind: "donors" (Schedule A) or "recipients" (Schedule B).
+
+    Behavior by SA/SB task status:
+      - ingested → render rows from schedule_a / schedule_b
+      - claimed/downloading/parsing → "loading" with auto-refresh +
+        priority bump so the user-accessed filing jumps the queue
+      - skipped → friendly "too large" message
+      - failed → error message with details
+      - no task row → enqueue at user priority and show "queued"
+    """
+    from .repo import enqueue_sa_sb_task
+
+    filing = session.get(FilingF3X, filing_id)
+    task = session.get(IngestionTask, (filing_id, "SA_SB"))
+    status = task.status if task else None
+    error_message = task.error_message if task else None
+    file_size_mb = task.file_size_mb if task else None
+
+    priority_bumped = False
+    if status in (None, "claimed", "downloading", "parsing"):
+        # If no task row yet, enqueue one at user priority.
+        # If task is in-flight, bump priority so the next free worker
+        # grabs it ahead of normal queue items.
+        if filing is not None:
+            enqueue_sa_sb_task(
+                session, filing_id,
+                fec_url=filing.fec_url,
+                priority=USER_BUMP_PRIORITY,
+            )
+            session.commit()
+            priority_bumped = True
+
+    rows: list = []
+    if status == "ingested":
+        if kind == "donors":
+            rows = session.exec(
+                select(ScheduleA)
+                .where(ScheduleA.filing_id == filing_id)
+                .order_by(ScheduleA.contribution_date.desc().nullslast(),
+                          ScheduleA.contribution_amount.desc().nullslast())
+            ).all()
+        else:
+            rows = session.exec(
+                select(ScheduleB)
+                .where(ScheduleB.filing_id == filing_id)
+                .order_by(ScheduleB.disbursement_date.desc().nullslast(),
+                          ScheduleB.disbursement_amount.desc().nullslast())
+            ).all()
+
+    return templates.TemplateResponse(
+        "filing_detail.html",
+        {
+            "request": request,
+            "filing_id": filing_id,
+            "filing": filing,
+            "status": status,
+            "error_message": error_message,
+            "file_size_mb": file_size_mb,
+            "rows": rows,
+            "kind": kind,
+            "kind_label": "Donors" if kind == "donors" else "Recipients",
+            "kind_lower": "donors" if kind == "donors" else "recipients",
+            "priority_bumped": priority_bumped,
+            "nav_date": (
+                filing.filed_at_utc.date() if filing
+                and filing.filed_at_utc else None
+            ),
+        },
+    )
+
+
+@app.get("/filing/{filing_id}/donors", response_class=HTMLResponse)
+def filing_donors(
+    filing_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return _render_filing_detail(
+        request, session, filing_id, kind="donors")
+
+
+@app.get("/filing/{filing_id}/recipients", response_class=HTMLResponse)
+def filing_recipients(
+    filing_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    return _render_filing_detail(
+        request, session, filing_id, kind="recipients")
 
 
 # -------------------------
@@ -779,12 +913,47 @@ def config_page(
     # Get PTR email setting
     ptr_email_enabled = get_ptr_email_enabled(session)
 
-    # Get SA target committee IDs
-    sa_target_committee_ids = get_sa_target_committee_ids(session)
-
     # Get PAC groups
     pac_groups = get_pac_groups(session)
     pac_groups_json = json.dumps(pac_groups, indent=2) if pac_groups else "[]"
+
+    # SA/SB worker: recent skipped/failed filings (operational visibility).
+    sa_sb_attention = session.exec(
+        select(IngestionTask, FilingF3X.committee_name)
+        .join(
+            FilingF3X,
+            FilingF3X.filing_id == IngestionTask.filing_id,
+            isouter=True,
+        )
+        .where(IngestionTask.source_feed == "SA_SB")
+        .where(IngestionTask.status.in_(["skipped", "failed"]))
+        .order_by(IngestionTask.updated_at.desc())
+        .limit(50)
+    ).all()
+    sa_sb_attention_rows = [
+        {
+            "filing_id": t.filing_id,
+            "status": t.status,
+            "skip_reason": t.skip_reason,
+            "failed_step": t.failed_step,
+            "error_message": t.error_message,
+            "file_size_mb": t.file_size_mb,
+            "updated_at": t.updated_at,
+            "committee_name": cname,
+            "fec_url": t.fec_url,
+        }
+        for t, cname in sa_sb_attention
+    ]
+
+    # SA/SB worker: latest run summaries (small + big).
+    sa_sb_runs = {}
+    for mode in ("small", "big"):
+        cfg = session.get(AppConfig, f"last_sa_sb_run_{mode}")
+        if cfg and cfg.value:
+            try:
+                sa_sb_runs[mode] = json.loads(cfg.value)
+            except json.JSONDecodeError:
+                pass
 
     return templates.TemplateResponse(
         "config.html",
@@ -797,8 +966,9 @@ def config_page(
             "max_new_per_run": max_new_per_run,
             "email_enabled": email_enabled,
             "ptr_email_enabled": ptr_email_enabled,
-            "sa_target_committee_ids": sa_target_committee_ids,
             "pac_groups_json": pac_groups_json,
+            "sa_sb_attention_rows": sa_sb_attention_rows,
+            "sa_sb_runs": sa_sb_runs,
             "message": message,
             "message_type": message_type,
         },
@@ -960,32 +1130,6 @@ def update_max_new_per_run(
     )
 
 
-@app.post("/config/settings/sa_target_committee_ids")
-def update_sa_target_committee_ids(
-    session: Session = Depends(get_session),
-    _: str = Depends(verify_admin),
-    committee_ids: str = Form(default=""),
-):
-    """Update target PAC committee IDs for Schedule A parsing. Admin-only."""
-    cids = [c.strip() for c in committee_ids.split(",") if c.strip()]
-    value = json.dumps(cids) if cids else "[]"
-
-    config = session.get(AppConfig, "sa_target_committee_ids")
-    if config:
-        config.value = value
-        config.updated_at = datetime.now(timezone.utc)
-    else:
-        config = AppConfig(key="sa_target_committee_ids", value=value)
-    session.add(config)
-    session.commit()
-
-    label = f"{len(cids)} committee(s)" if cids else "none"
-    return RedirectResponse(
-        url=f"/config?message=SA target committees updated to {label}&message_type=success",
-        status_code=303,
-    )
-
-
 @app.post("/config/settings/pac_groups")
 def update_pac_groups(
     session: Session = Depends(get_session),
@@ -1008,6 +1152,45 @@ def update_pac_groups(
             url=f"/config?message=Invalid JSON: {e}&message_type=error",
             status_code=303,
         )
+
+
+@app.post("/config/test-sa-sb-alert")
+def test_sa_sb_alert(
+    session: Session = Depends(get_session),
+    _: str = Depends(verify_admin),
+):
+    """Send a synthetic SA/SB attention alert to confirm the email
+    pipeline is working. Picks up to 3 recent F3X filings for the
+    skipped/streamed/failed sections so the email isn't empty."""
+    from .email_service import send_sa_sb_attention_alert
+    from sqlalchemy import desc
+
+    # Use up to 3 recent filings as fixture content; if there are none,
+    # the alert sender will short-circuit (which still confirms the path).
+    recents = session.exec(
+        select(FilingF3X)
+        .order_by(desc(FilingF3X.filed_at_utc))
+        .limit(3)
+    ).all()
+    fids = [f.filing_id for f in recents]
+
+    sent = send_sa_sb_attention_alert(
+        session,
+        mode="test",
+        skipped_filing_ids=fids[:1],
+        streamed_filing_ids=fids[1:2],
+        failed_filing_ids=fids[2:3],
+    )
+    if sent:
+        msg = f"Test alert sent to {len(sent)} recipient(s)"
+        msg_type = "success"
+    else:
+        msg = "Test alert NOT sent — check recipient list and email config"
+        msg_type = "error"
+    return RedirectResponse(
+        url=f"/config?message={msg}&message_type={msg_type}",
+        status_code=303,
+    )
 
 
 @app.post("/config/parse-sa")
@@ -1293,6 +1476,8 @@ def dashboard_date_3x(
         stmt = stmt.where(FilingF3X.total_receipts >= threshold)
     stmt = stmt.order_by(FilingF3X.filed_at_utc.desc()).limit(limit)
     rows = session.exec(stmt).all()
+    sa_sb_status = _sa_sb_status_map(
+        session, [r.filing_id for r in rows])
 
     if threshold > 0:
         label = f"F3X Filings (≥${threshold:,.0f})"
@@ -1304,6 +1489,7 @@ def dashboard_date_3x(
         {
             "request": request,
             "rows": rows,
+            "sa_sb_status": sa_sb_status,
             "target_date": target_date,
             "prev_date": target_date - timedelta(days=1),
             "next_date": target_date + timedelta(days=1),

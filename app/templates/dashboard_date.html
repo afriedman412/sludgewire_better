@@ -79,14 +79,27 @@
             <td>{{ r.form_type }}</td>
             <td>{{ r.report_type }}</td>
             <td>{{ r.coverage_from }} → {{ r.coverage_through }}</td>
+            {% set st = sa_sb_status.get(r.filing_id) %}
             <td class="money">
                 {% if r.total_receipts is not none %}
-                ${{ "{:,.2f}".format(r.total_receipts) }}
+                    {% if st == "ingested" %}
+                    <a href="/filing/{{ r.filing_id }}/donors">${{ "{:,.2f}".format(r.total_receipts) }}</a>
+                    {% elif st in ("claimed", "downloading", "parsing") %}
+                    <a href="/filing/{{ r.filing_id }}/donors" title="SA/SB worker is processing this filing">${{ "{:,.2f}".format(r.total_receipts) }} <span style="color:#b08800;font-size:11px;">⏳ LOADING</span></a>
+                    {% else %}
+                    ${{ "{:,.2f}".format(r.total_receipts) }}
+                    {% endif %}
                 {% endif %}
             </td>
             <td class="money">
                 {% if r.total_disbursements is not none %}
-                ${{ "{:,.2f}".format(r.total_disbursements) }}
+                    {% if st == "ingested" %}
+                    <a href="/filing/{{ r.filing_id }}/recipients">${{ "{:,.2f}".format(r.total_disbursements) }}</a>
+                    {% elif st in ("claimed", "downloading", "parsing") %}
+                    <a href="/filing/{{ r.filing_id }}/recipients" title="SA/SB worker is processing this filing">${{ "{:,.2f}".format(r.total_disbursements) }} <span style="color:#b08800;font-size:11px;">⏳ LOADING</span></a>
+                    {% else %}
+                    ${{ "{:,.2f}".format(r.total_disbursements) }}
+                    {% endif %}
                 {% endif %}
             </td>
             <td>
