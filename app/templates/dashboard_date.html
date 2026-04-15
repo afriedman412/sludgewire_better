@@ -82,24 +82,28 @@
             {% set st = sa_sb_status.get(r.filing_id) %}
             <td class="money">
                 {% if r.total_receipts is not none %}
-                    {% if st == "ingested" %}
                     <a href="/filing/{{ r.filing_id }}/donors">${{ "{:,.2f}".format(r.total_receipts) }}</a>
-                    {% elif st in ("claimed", "downloading", "parsing") %}
-                    <a href="/filing/{{ r.filing_id }}/donors" title="SA/SB worker is processing this filing">${{ "{:,.2f}".format(r.total_receipts) }} <span style="color:#b08800;font-size:11px;">⏳ LOADING</span></a>
-                    {% else %}
-                    ${{ "{:,.2f}".format(r.total_receipts) }}
+                    {% if st in ("claimed", "downloading", "parsing") %}
+                    <span style="color:#b08800;font-size:11px;" title="SA/SB worker is processing this filing">⏳</span>
+                    {% elif st == "skipped" %}
+                    <span style="color:#999;font-size:11px;" title="too large to ingest — click for details">⚠</span>
+                    {% elif st == "failed" %}
+                    <span style="color:#dc3545;font-size:11px;" title="SA/SB parsing failed — click for details">⚠</span>
                     {% endif %}
                 {% endif %}
             </td>
             <td class="money">
                 {% if r.total_disbursements is not none %}
-                    {% if st == "ingested" %}
                     <a href="/filing/{{ r.filing_id }}/recipients">${{ "{:,.2f}".format(r.total_disbursements) }}</a>
-                    {% elif st in ("claimed", "downloading", "parsing") %}
-                    <a href="/filing/{{ r.filing_id }}/recipients" title="SA/SB worker is processing this filing">${{ "{:,.2f}".format(r.total_disbursements) }} <span style="color:#b08800;font-size:11px;">⏳ LOADING</span></a>
-                    {% else %}
-                    ${{ "{:,.2f}".format(r.total_disbursements) }}
+                    {% if st in ("claimed", "downloading", "parsing") %}
+                    <span style="color:#b08800;font-size:11px;" title="SA/SB worker is processing this filing">⏳</span>
+                    {% elif st == "skipped" %}
+                    <span style="color:#999;font-size:11px;" title="too large to ingest — click for details">⚠</span>
+                    {% elif st == "failed" %}
+                    <span style="color:#dc3545;font-size:11px;" title="SA/SB parsing failed — click for details">⚠</span>
                     {% endif %}
+                {% elif r.total_receipts is not none %}
+                    <a href="/filing/{{ r.filing_id }}/recipients" style="color:#999;" title="click to fetch disbursement data">—</a>
                 {% endif %}
             </td>
             <td>
