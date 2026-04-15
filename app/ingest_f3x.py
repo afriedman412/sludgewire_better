@@ -9,7 +9,10 @@ from sqlmodel import Session
 from .feeds import fetch_rss_items, infer_filing_id, parse_mmddyyyy
 from .fec_lookup import resolve_committee_name
 from .fec_parse import download_fec_header, parse_f3x_header_only, extract_committee_name
-from .repo import claim_filing, update_filing_status, upsert_f3x, get_max_new_per_run
+from .repo import (
+    claim_filing, update_filing_status, upsert_f3x,
+    get_max_new_per_run, enqueue_sa_sb_task,
+)
 
 MAX_HEADER_BYTES = 50_000  # Only need first ~50KB for F3X header
 
@@ -87,14 +90,19 @@ def run_f3x(session: Session, *, feed_url: str, receipts_threshold: float) -> F3
             # Light parse - header only, no fecfile
             parsed = parse_f3x_header_only(fec_text)
             _log_mem(f"after_parse_{filing_id}")
-            total = parsed.get("filing", {}).get("col_a_total_receipts")
-            if total not in (None, ""):
+            filing_fields = parsed.get("filing", {})
+
+            def _to_float(v):
+                if v in (None, ""):
+                    return None
                 try:
-                    total = float(total)
+                    return float(v)
                 except (TypeError, ValueError):
-                    total = None
-            else:
-                total = None
+                    return None
+
+            total = _to_float(filing_fields.get("col_a_total_receipts"))
+            total_disb = _to_float(
+                filing_fields.get("col_a_total_disbursements"))
             threshold_flag = (total is not None and total >= receipts_threshold)
 
             meta = item.meta
@@ -116,11 +124,17 @@ def run_f3x(session: Session, *, feed_url: str, receipts_threshold: float) -> F3
                 filed_at_utc=item.pub_date_utc,
                 fec_url=item.link,
                 total_receipts=total,
+                total_disbursements=total_disb,
                 threshold_flag=threshold_flag,
                 raw_meta=meta,
             )
             update_filing_status(
                 session, filing_id, "F3X", "ingested")
+            # Enqueue full-file SA/SB ingestion for the background worker.
+            # Default priority = filing_id (newest first since FEC ids
+            # are monotonic).
+            enqueue_sa_sb_task(
+                session, filing_id, fec_url=item.link)
         except Exception as e:
             print(f"[F3X] Failed to process {filing_id}: {e}")
             update_filing_status(

@@ -68,6 +68,7 @@
             <th>Report</th>
             <th>Coverage</th>
             <th>Total receipts</th>
+            <th>Total disbursements</th>
             <th>Raw</th>
         </tr>
     </thead>
@@ -81,7 +82,29 @@
             <td>{{ r.form_type }}</td>
             <td>{{ r.report_type }}</td>
             <td>{{ r.coverage_from }} → {{ r.coverage_through }}</td>
-            <td class="money">{% if r.total_receipts is not none %}${{ "{:,.2f}".format(r.total_receipts) }}{% else %}N/A{% endif %}</td>
+            {% set st = sa_sb_status.get(r.filing_id) %}
+            <td class="money">
+                {% if r.total_receipts is not none %}
+                    {% if st == "ingested" %}
+                    <a href="/filing/{{ r.filing_id }}/donors">${{ "{:,.2f}".format(r.total_receipts) }}</a>
+                    {% elif st in ("claimed", "downloading", "parsing") %}
+                    <a href="/filing/{{ r.filing_id }}/donors" title="SA/SB worker is processing this filing">${{ "{:,.2f}".format(r.total_receipts) }} <span style="color:#b08800;font-size:11px;">⏳ LOADING</span></a>
+                    {% else %}
+                    ${{ "{:,.2f}".format(r.total_receipts) }}
+                    {% endif %}
+                {% else %}N/A{% endif %}
+            </td>
+            <td class="money">
+                {% if r.total_disbursements is not none %}
+                    {% if st == "ingested" %}
+                    <a href="/filing/{{ r.filing_id }}/recipients">${{ "{:,.2f}".format(r.total_disbursements) }}</a>
+                    {% elif st in ("claimed", "downloading", "parsing") %}
+                    <a href="/filing/{{ r.filing_id }}/recipients" title="SA/SB worker is processing this filing">${{ "{:,.2f}".format(r.total_disbursements) }} <span style="color:#b08800;font-size:11px;">⏳ LOADING</span></a>
+                    {% else %}
+                    ${{ "{:,.2f}".format(r.total_disbursements) }}
+                    {% endif %}
+                {% else %}N/A{% endif %}
+            </td>
             <td>
                 <a href="{{ r.fec_url }}" target="_blank" rel="noreferrer">.fec</a>
             </td>
@@ -89,7 +112,7 @@
         {% endfor %}
         {% else %}
         <tr>
-            <td colspan="8">No filings found.</td>
+            <td colspan="9">No filings found.</td>
         </tr>
         {% endif %}
     </tbody>

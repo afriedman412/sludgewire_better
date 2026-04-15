@@ -7,7 +7,7 @@ from sqlmodel import Session
 
 import json
 
-from .schemas import IngestionTask, FilingF3X, IEScheduleE, ScheduleA, AppConfig, RaceCandidate
+from .schemas import IngestionTask, FilingF3X, IEScheduleE, ScheduleA, ScheduleB, AppConfig, RaceCandidate
 
 
 # Default values for configurable settings
@@ -169,6 +169,7 @@ def upsert_f3x(
     filed_at_utc,
     fec_url: str,
     total_receipts: Optional[float],
+    total_disbursements: Optional[float],
     threshold_flag: bool,
     raw_meta: Optional[Dict[str, Any]],
 ) -> None:
@@ -188,6 +189,7 @@ def upsert_f3x(
                 filed_at_utc=filed_at_utc,
                 fec_url=fec_url,
                 total_receipts=total_receipts,
+                total_disbursements=total_disbursements,
                 threshold_flag=threshold_flag,
                 raw_meta=raw_meta,
                 updated_at_utc=now,
@@ -203,6 +205,7 @@ def upsert_f3x(
         row.filed_at_utc = filed_at_utc
         row.fec_url = fec_url
         row.total_receipts = total_receipts
+        row.total_disbursements = total_disbursements
         row.threshold_flag = threshold_flag
         if raw_meta is not None:
             row.raw_meta = raw_meta
@@ -210,6 +213,57 @@ def upsert_f3x(
         session.add(row)
 
     session.flush()
+
+
+def enqueue_sa_sb_task(
+    session: Session,
+    filing_id: int,
+    *,
+    fec_url: Optional[str] = None,
+    priority: Optional[int] = None,
+) -> None:
+    """Enqueue a filing for full-file SA/SB ingestion.
+
+    Inserts an IngestionTask row with source_feed='SA_SB' if one does not
+    already exist. If it exists and priority is higher than the stored
+    value, bump it (used when a user accesses a detail page for a filing
+    whose SA/SB ingestion is still pending).
+
+    Default priority is the filing_id itself, so naturally newer filings
+    are processed before older ones (FEC filing_ids are monotonic).
+    """
+    effective_priority = priority if priority is not None else filing_id
+    existing = session.get(IngestionTask, (filing_id, "SA_SB"))
+    if existing is None:
+        try:
+            with session.begin_nested():
+                session.add(IngestionTask(
+                    filing_id=filing_id,
+                    source_feed="SA_SB",
+                    status="claimed",
+                    fec_url=fec_url,
+                    priority=effective_priority,
+                ))
+        except Exception:
+            pass
+        return
+    if existing.priority is None or effective_priority > existing.priority:
+        existing.priority = effective_priority
+        existing.updated_at = datetime.now(timezone.utc)
+        session.add(existing)
+
+
+def insert_sb_event(session: Session, event: ScheduleB) -> bool:
+    """Insert-only dedupe by primary key event_id."""
+    existing = session.get(ScheduleB, event.event_id)
+    if existing:
+        return False
+    try:
+        with session.begin_nested():
+            session.add(event)
+        return True
+    except Exception:
+        return False
 
 
 def insert_ie_event(session: Session, event: IEScheduleE) -> bool:
@@ -242,19 +296,6 @@ def insert_sa_event(session: Session, event: ScheduleA) -> bool:
         return True
     except Exception:
         return False
-
-
-def get_sa_target_committee_ids(session: Session) -> list[str]:
-    """Get the list of committee IDs for Schedule A parsing."""
-    config = session.get(AppConfig, "sa_target_committee_ids")
-    if config and config.value:
-        try:
-            ids = json.loads(config.value)
-            if isinstance(ids, list):
-                return [c.strip() for c in ids if isinstance(c, str) and c.strip()]
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return []
 
 
 def get_pac_groups(session: Session) -> list[dict]:

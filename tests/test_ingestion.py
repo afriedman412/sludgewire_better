@@ -7,12 +7,14 @@ from unittest.mock import patch, MagicMock
 import pytest
 from sqlmodel import Session
 
-from app.schemas import IngestionTask, FilingF3X, IEScheduleE, AppConfig
+from app.schemas import IngestionTask, FilingF3X, IEScheduleE, AppConfig, ScheduleB
 from app.repo import (
     claim_filing,
     update_filing_status,
     upsert_f3x,
     insert_ie_event,
+    insert_sb_event,
+    enqueue_sa_sb_task,
     record_skipped_filing,
     mark_tasks_emailed,
     reset_failed_tasks,
@@ -247,6 +249,7 @@ class TestUpsertF3X:
             filed_at_utc=datetime.now(timezone.utc),
             fec_url=f"https://example.com/{filing_id}.fec",
             total_receipts=total_receipts,
+            total_disbursements=None,
             threshold_flag=total_receipts is not None and total_receipts >= 50_000,
             raw_meta={"FormType": "F3XN"},
         )
@@ -273,6 +276,16 @@ class TestUpsertF3X:
         row = session.get(FilingF3X, 300)
         assert row.total_receipts is None
         assert row.threshold_flag is False
+
+    def test_total_disbursements_persisted(self, session):
+        self._upsert(session, total_disbursements=42_000.0)
+        row = session.get(FilingF3X, 300)
+        assert row.total_disbursements == 42_000.0
+
+    def test_total_disbursements_null_by_default(self, session):
+        self._upsert(session)
+        row = session.get(FilingF3X, 300)
+        assert row.total_disbursements is None
 
 
 # -------------------------------------------------------
@@ -507,3 +520,84 @@ class TestRunIEIntegration:
         assert task.status == "failed"
         assert task.failed_step == "downloading"
         assert "Timeout" in task.error_message
+
+
+# -------------------------------------------------------
+# enqueue_sa_sb_task (queue for the SA/SB worker)
+# -------------------------------------------------------
+
+class TestEnqueueSaSbTask:
+    def test_first_enqueue_inserts_claimed_row(self, session):
+        enqueue_sa_sb_task(session, 9001, fec_url="https://ex.com/9001.fec")
+        session.commit()
+        row = session.get(IngestionTask, (9001, "SA_SB"))
+        assert row is not None
+        assert row.status == "claimed"
+        assert row.fec_url == "https://ex.com/9001.fec"
+
+    def test_default_priority_equals_filing_id(self, session):
+        enqueue_sa_sb_task(session, 9001)
+        session.commit()
+        row = session.get(IngestionTask, (9001, "SA_SB"))
+        assert row.priority == 9001
+
+    def test_explicit_priority_overrides_default(self, session):
+        enqueue_sa_sb_task(session, 9001, priority=500000)
+        session.commit()
+        row = session.get(IngestionTask, (9001, "SA_SB"))
+        assert row.priority == 500000
+
+    def test_reenqueue_with_higher_priority_bumps(self, session):
+        enqueue_sa_sb_task(session, 9001)  # priority=9001
+        session.commit()
+        enqueue_sa_sb_task(session, 9001, priority=999999)
+        session.commit()
+        row = session.get(IngestionTask, (9001, "SA_SB"))
+        assert row.priority == 999999
+
+    def test_reenqueue_with_lower_priority_does_not_bump(self, session):
+        enqueue_sa_sb_task(session, 9001, priority=999999)
+        session.commit()
+        enqueue_sa_sb_task(session, 9001, priority=100)
+        session.commit()
+        row = session.get(IngestionTask, (9001, "SA_SB"))
+        assert row.priority == 999999
+
+    def test_independent_of_f3x_task(self, session):
+        # SA_SB enqueue should not conflict with an existing F3X task
+        claim_filing(session, 9001, "F3X")
+        update_filing_status(session, 9001, "F3X", "ingested")
+        enqueue_sa_sb_task(session, 9001)
+        session.commit()
+        assert session.get(IngestionTask, (9001, "F3X")).status == "ingested"
+        assert session.get(IngestionTask, (9001, "SA_SB")).status == "claimed"
+
+
+# -------------------------------------------------------
+# insert_sb_event (Schedule B dedupe)
+# -------------------------------------------------------
+
+class TestInsertSbEvent:
+    def _make_sb(self, event_id="sb-1", filing_id=500):
+        return ScheduleB(
+            event_id=event_id,
+            filing_id=filing_id,
+            committee_id="C00000003",
+            committee_name="PAC",
+            payee_name="ACME CORP",
+            disbursement_amount=1500.00,
+            disbursement_date=date(2024, 3, 1),
+            fec_url="https://ex.com/500.fec",
+            raw_line="SB|C00000003|ORG|ACME...",
+        )
+
+    def test_insert_new(self, session):
+        assert insert_sb_event(session, self._make_sb()) is True
+        row = session.get(ScheduleB, "sb-1")
+        assert row is not None
+        assert row.disbursement_amount == 1500.00
+
+    def test_duplicate_returns_false(self, session):
+        insert_sb_event(session, self._make_sb())
+        session.commit()
+        assert insert_sb_event(session, self._make_sb()) is False

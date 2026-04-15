@@ -22,7 +22,6 @@ from app.db import make_engine, init_db
 
 from app.ingest_f3x import run_f3x
 from app.ingest_ie import run_ie_schedule_e
-from app.ingest_sa import run_sa
 from app.email_service import send_filing_alert, send_ptr_alert
 from app.repo import get_max_new_per_run, get_email_enabled, get_ptr_email_enabled, mark_tasks_emailed
 from app.schemas import AppConfig, FilingF3X, IEScheduleE, PtrFiling, PtrTransaction
@@ -70,8 +69,6 @@ def run_job():
     last_f3x_error = None
     total_ie_filings = 0
     total_ie_events = 0
-    total_sa_filings = 0
-    total_sa_events = 0
     total_ptr_new = 0
     total_ptr_parsed = 0
 
@@ -83,8 +80,6 @@ def run_job():
         "f3x_new": 0,
         "f3x_failed": 0,
         "ie_events_new": 0,
-        "sa_filings": 0,
-        "sa_events": 0,
         "ptr_new": 0,
         "ptr_parsed": 0,
         "iterations": 0,
@@ -141,16 +136,9 @@ def run_job():
                 except Exception as e:
                     log(f"IE error: {e}")
 
-                # Run SA second-pass (re-download target PAC filings for Schedule A)
-                try:
-                    sa_result = run_sa(session)
-                    total_sa_filings += sa_result.filings_processed
-                    total_sa_events += sa_result.events_inserted
-                    log(f"SA: {sa_result.filings_processed} filings, "
-                        f"{sa_result.events_inserted} events this batch")
-                except Exception as e:
-                    log(f"SA error: {e}")
-
+                # SA/SB second-pass now runs as a separate Cloud Run Job
+                # (fec-sa-sb-job, fec-sa-sb-job-big). The light F3X
+                # ingester enqueues SA_SB tasks; the workers drain them.
                 session.commit()
                 gc.collect()
 
@@ -158,8 +146,6 @@ def run_job():
             results["f3x_new"] = total_f3x
             results["f3x_failed"] = total_f3x_failed
             results["ie_events_new"] = total_ie_events
-            results["sa_filings"] = total_sa_filings
-            results["sa_events"] = total_sa_events
             results["iterations"] = iteration
             if last_f3x_error:
                 results["f3x_error"] = (
@@ -246,8 +232,7 @@ def run_job():
         elapsed = (time.time() - start_time) / 60
         log(f"Job complete in {elapsed:.1f} min over {iteration} iterations")
         log(f"Totals: F3X={total_f3x}, IE filings={total_ie_filings}, "
-            f"IE events={total_ie_events}, SA filings={total_sa_filings}, "
-            f"SA events={total_sa_events}, PTR new={total_ptr_new}, "
+            f"IE events={total_ie_events}, PTR new={total_ptr_new}, "
             f"PTR parsed={total_ptr_parsed}")
 
         # Send email if we found new high-value filings

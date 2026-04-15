@@ -26,6 +26,12 @@ ENV PYTHONPATH=/app
 # Expose port
 EXPOSE 8080
 
-# Default command: run web server with gunicorn
-# Override with MODE=job for background jobs
-CMD ["sh", "-c", "if [ \"$MODE\" = 'job' ]; then python -m scripts.ingest_job; else gunicorn app.main:app --bind 0.0.0.0:8080 --workers 1 --worker-class uvicorn.workers.UvicornWorker --timeout 300; fi"]
+# Default: web server. Set MODE=job for the light F3X/IE/PTR ingest job,
+# or MODE=sa_sb_worker for the SA/SB worker (which also reads
+# SA_SB_WORKER_MODE=small|big to choose the size tier).
+CMD ["sh", "-c", "case \"$MODE\" in \
+  job) python -m scripts.ingest_job ;; \
+  sa_sb_worker) python -m scripts.sa_sb_worker ;; \
+  *) gunicorn app.main:app --bind 0.0.0.0:8080 --workers 1 \
+     --worker-class uvicorn.workers.UvicornWorker --timeout 300 ;; \
+esac"]
