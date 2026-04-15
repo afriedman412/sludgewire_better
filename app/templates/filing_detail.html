@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+
+{% block title %}{{ kind_label }} — Filing {{ filing_id }}{% endblock %}
+
+{% block head %}
+{% if status in ("claimed", "downloading", "parsing") %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+<style>
+  .status-banner {
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 14px;
+  }
+  .status-loading { background: #fff8e1; border: 1px solid #ffe082; }
+  .status-skipped { background: #fef0e6; border: 1px solid #ffcc99; }
+  .status-failed  { background: #fde2e2; border: 1px solid #f5a8a8; }
+  .status-empty   { background: #f0f0f0; border: 1px solid #ccc; color: #555; }
+  .filing-meta {
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #ccc;
+    border-top-color: #555;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2>{{ kind_label }} — Filing {{ filing_id }}</h2>
+
+{% if filing %}
+<div class="filing-meta">
+  <strong>{{ filing.committee_name or filing.committee_id }}</strong>
+  ({{ filing.committee_id }})
+  · {{ filing.form_type or '' }} {{ filing.report_type or '' }}
+  {% if filing.coverage_from %}
+  · {{ filing.coverage_from }} → {{ filing.coverage_through }}
+  {% endif %}
+  · <a href="{{ filing.fec_url }}" target="_blank" rel="noreferrer">.fec</a>
+  · <a href="/{{ filing.filed_at_utc.year }}/{{ '%02d' % filing.filed_at_utc.month }}/{{ '%02d' % filing.filed_at_utc.day }}/3x">back to dashboard</a>
+</div>
+{% endif %}
+
+{% if status in ("claimed", "downloading", "parsing") %}
+<div class="status-banner status-loading">
+  <span class="spinner"></span>
+  <strong>Processing…</strong>
+  This filing's {{ kind_lower }} are being extracted by the SA/SB worker
+  ({{ status }}). This page auto-refreshes every 5 seconds.
+  {% if priority_bumped %}
+  <em>Bumped to the front of the queue.</em>
+  {% endif %}
+</div>
+{% elif status == "skipped" %}
+<div class="status-banner status-skipped">
+  <strong>Skipped.</strong>
+  This filing was too large to ingest
+  {% if file_size_mb %}({{ "%.1f"|format(file_size_mb) }} MB){% endif %}
+  and exceeded the hard size cap. View the
+  <a href="{{ filing.fec_url }}" target="_blank" rel="noreferrer">raw FEC file</a>
+  to see {{ kind_lower }} directly.
+</div>
+{% elif status == "failed" %}
+<div class="status-banner status-failed">
+  <strong>Failed.</strong>
+  This filing's {{ kind_lower }} could not be ingested.
+  {% if error_message %}<br>Error: <code>{{ error_message }}</code>{% endif %}
+</div>
+{% elif status == "ingested" and not rows %}
+<div class="status-banner status-empty">
+  No {{ kind_lower }} found in this filing.
+</div>
+{% elif status is none %}
+<div class="status-banner status-loading">
+  <span class="spinner"></span>
+  <strong>Queued.</strong>
+  This filing has been added to the SA/SB worker queue.
+  This page auto-refreshes every 5 seconds.
+</div>
+{% endif %}
+
+{% if status == "ingested" and rows %}
+<p>{{ rows|length }} {{ kind_lower }}{{ "s" if rows|length != 1 else "" }}.</p>
+{% if kind == "donors" %}
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Contributor</th>
+      <th>Type</th>
+      <th>Employer</th>
+      <th>Occupation</th>
+      <th>Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.contribution_date or "" }}</td>
+      <td>{{ r.contributor_name or "" }}</td>
+      <td>{{ r.contributor_type or "" }}</td>
+      <td>{{ r.contributor_employer or "" }}</td>
+      <td>{{ r.contributor_occupation or "" }}</td>
+      <td class="money">{% if r.contribution_amount is not none %}${{ "{:,.2f}".format(r.contribution_amount) }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}{# kind == "recipients" #}
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Payee</th>
+      <th>Type</th>
+      <th>Purpose</th>
+      <th>Beneficiary candidate</th>
+      <th>Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.disbursement_date or "" }}</td>
+      <td>{{ r.payee_name or "" }}</td>
+      <td>{{ r.payee_type or "" }}</td>
+      <td>{{ r.purpose or "" }}</td>
+      <td>
+        {% if r.beneficiary_candidate_id %}
+        <a href="https://www.fec.gov/data/candidate/{{ r.beneficiary_candidate_id }}/" target="_blank" rel="noreferrer">{{ r.beneficiary_candidate_name or r.beneficiary_candidate_id }}</a>
+        {% else %}
+        {{ r.beneficiary_candidate_name or "" }}
+        {% endif %}
+      </td>
+      <td class="money">{% if r.disbursement_amount is not none %}${{ "{:,.2f}".format(r.disbursement_amount) }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endblock %}

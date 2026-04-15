@@ -125,15 +125,21 @@ def parse_f3x_header_only(fec_text: str) -> dict:
                     except ValueError:
                         pass
 
-    # Fallback: if we didn't find totals, use fecfile on truncated text
-    # Only keep first 200 lines (header/summary) - skip itemizations
-    if "col_a_total_receipts" not in filing:
+    # Fallback: use fecfile on truncated text to fill in whatever is missing.
+    # The positional scan above can find col_a_total_receipts but cannot
+    # reliably distinguish disbursements by position, so we run fecfile to
+    # get canonical values. Limited to first 200 lines (header/summary).
+    need_receipts = "col_a_total_receipts" not in filing
+    need_disbursements = "col_a_total_disbursements" not in filing
+    if need_receipts or need_disbursements:
         try:
             truncated = '\n'.join(fec_text.split('\n')[:200])
             full_parsed = _get_fecfile().loads(truncated)
             filing_data = full_parsed.get("filing", {})
             if "col_a_total_receipts" in filing_data:
                 filing["col_a_total_receipts"] = filing_data["col_a_total_receipts"]
+            if "col_a_total_disbursements" in filing_data:
+                filing["col_a_total_disbursements"] = filing_data["col_a_total_disbursements"]
             if "committee_name" not in filing and "committee_name" in filing_data:
                 filing["committee_name"] = filing_data["committee_name"]
             if "filer_committee_id_name" in filing_data:
@@ -437,6 +443,334 @@ def extract_schedule_a_best_effort(fec_text: str, parsed: dict = None) -> Iterab
             "contributor_type": None,
             "memo_text": None,
         }
+
+
+def extract_schedule_b_best_effort(fec_text: str, parsed: dict = None) -> Iterable[Tuple[str, dict]]:
+    """
+    Yields (raw_line, extracted_fields_dict) for Schedule B (disbursement)
+    items. Uses fecfile parsed output for structured field extraction.
+    Falls back to raw line parsing if fecfile fails.
+
+    The returned dict contains: payee_name, payee_employer, payee_occupation,
+    disbursement_amount, disbursement_date, disbursement_description,
+    payee_type, purpose, category_code, memo_text, beneficiary_candidate_id,
+    beneficiary_candidate_name.
+    """
+    try:
+        if parsed is None:
+            parsed = _get_fecfile().loads(fec_text)
+        itemizations = parsed.get("itemizations", {})
+
+        sb_items = itemizations.get(
+            "Schedule B", []) or itemizations.get("SB", [])
+
+        for item in sb_items:
+            raw_line = "|".join(str(v) for v in item.values() if v)
+
+            # Build payee name (org or individual)
+            org_name = item.get("payee_organization_name", "")
+            if org_name and org_name.strip():
+                payee_name = org_name.strip()
+            else:
+                name_parts = [
+                    item.get("payee_first_name", ""),
+                    item.get("payee_middle_name", ""),
+                    item.get("payee_last_name", ""),
+                ]
+                payee_name = " ".join(
+                    p.strip() for p in name_parts if p and p.strip())
+                suffix = item.get("payee_suffix", "")
+                if suffix and suffix.strip():
+                    payee_name += f" {suffix.strip()}"
+
+            amount = None
+            for amount_field in (
+                "expenditure_amount",
+                "disbursement_amount",
+            ):
+                amount_val = item.get(amount_field)
+                if amount_val is not None:
+                    try:
+                        amount = float(amount_val)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+
+            disbursement_date = None
+            for date_field in (
+                "expenditure_date",
+                "disbursement_date",
+            ):
+                val = item.get(date_field)
+                if val:
+                    if isinstance(val, datetime):
+                        disbursement_date = val.date()
+                    elif isinstance(val, date):
+                        disbursement_date = val
+                    elif isinstance(val, str):
+                        disbursement_date = _parse_date_flexible(val)
+                    if disbursement_date:
+                        break
+
+            purpose = (
+                item.get("expenditure_purpose_descrip")
+                or item.get("purpose_of_disbursement")
+                or ""
+            ).strip() or None
+
+            beneficiary_parts = [
+                item.get("beneficiary_candidate_first_name", ""),
+                item.get("beneficiary_candidate_last_name", ""),
+            ]
+            beneficiary_name = " ".join(
+                p.strip() for p in beneficiary_parts if p and p.strip()
+            ) or None
+
+            yield raw_line, {
+                "payee_name": payee_name or None,
+                "payee_employer": (
+                    item.get("payee_employer") or ""
+                ).strip() or None,
+                "payee_occupation": (
+                    item.get("payee_occupation") or ""
+                ).strip() or None,
+                "disbursement_amount": amount,
+                "disbursement_date": disbursement_date,
+                "disbursement_description": (
+                    item.get("disbursement_description") or ""
+                ).strip() or None,
+                "payee_type": item.get("entity_type"),
+                "purpose": purpose,
+                "category_code": (
+                    item.get("category_code") or ""
+                ).strip() or None,
+                "memo_text": (
+                    item.get("memo_text_description")
+                    or item.get("memo_text")
+                    or ""
+                ).strip() or None,
+                "beneficiary_candidate_id": (
+                    item.get("beneficiary_candidate_id_number") or ""
+                ).strip() or None,
+                "beneficiary_candidate_name": beneficiary_name,
+            }
+
+        if sb_items:
+            return
+
+    except Exception:
+        pass
+
+    # Fallback: raw line parsing for SB records
+    for row in iter_pipe_rows(fec_text):
+        rec = row[0]
+        if not rec.startswith("SB"):
+            continue
+
+        raw_line = "|".join(row)
+        amount = _best_amount(row)
+        disbursement_date = _first_date(row)
+        payee_name = _first_name_like(row)
+
+        yield raw_line, {
+            "payee_name": payee_name,
+            "payee_employer": None,
+            "payee_occupation": None,
+            "disbursement_amount": amount,
+            "disbursement_date": disbursement_date,
+            "disbursement_description": None,
+            "payee_type": None,
+            "purpose": None,
+            "category_code": None,
+            "memo_text": None,
+            "beneficiary_candidate_id": None,
+            "beneficiary_candidate_name": None,
+        }
+
+
+def stream_sa_sb_from_url(
+    fec_url: str,
+    timeout: int = 120,
+) -> Iterable[Tuple[str, str, dict]]:
+    """
+    Stream a large FEC filing directly from URL, yielding SA and SB items
+    without loading the full file into memory. Bounded memory regardless
+    of file size.
+
+    Yields (kind, raw_line, fields) tuples where kind is "SA" or "SB".
+    Field accuracy is lower than fecfile — memo_text, employer, occupation,
+    beneficiary_candidate_id are typically None. Amount, date, payee/
+    contributor name (via CSV-indexed read) are extracted.
+
+    Use this only when fecfile would OOM (filings > ~300MB).
+    """
+    r = requests.get(
+        fec_url,
+        timeout=(30, timeout),
+        stream=True,
+    )
+    r.raise_for_status()
+
+    # iter_lines with a generous decode; FEC files are latin-1 safe
+    buf = io.StringIO()
+    for chunk in r.iter_content(chunk_size=65536, decode_unicode=False):
+        if not chunk:
+            continue
+        buf.write(chunk.decode("utf-8", errors="replace"))
+        buf.seek(0)
+        remaining = buf.read()
+        lines = remaining.split("\n")
+        # Last item may be an incomplete line — hold it back in the buffer.
+        incomplete = lines[-1]
+        complete_lines = lines[:-1]
+        for line in complete_lines:
+            parsed = _stream_parse_line(line)
+            if parsed is not None:
+                yield parsed
+        buf = io.StringIO()
+        buf.write(incomplete)
+    # Flush any final buffered line.
+    final = buf.getvalue()
+    if final.strip():
+        parsed = _stream_parse_line(final)
+        if parsed is not None:
+            yield parsed
+    r.close()
+
+
+def _stream_parse_line(line: str) -> Optional[Tuple[str, str, dict]]:
+    """
+    Parse one pipe-delimited record line. Returns (kind, raw_line, fields)
+    for SA/SB records, None otherwise. Uses csv.reader to handle embedded
+    quoting and delimiters correctly.
+    """
+    if not line or not line.strip():
+        return None
+    # csv.reader expects an iterable of lines
+    try:
+        row = next(csv.reader([line], delimiter="|"))
+    except Exception:
+        return None
+    if not row:
+        return None
+
+    rec = row[0].strip()
+    if rec.startswith("SA"):
+        return ("SA", "|".join(row), _extract_sa_fields_positional(row))
+    if rec.startswith("SB"):
+        return ("SB", "|".join(row), _extract_sb_fields_positional(row))
+    return None
+
+
+_ZIP_RE = re.compile(r"^\d{5}(\d{4})?$")
+
+
+def _looks_like_amount(tok: str) -> Optional[float]:
+    """Return the float if the token looks like a monetary amount, else None.
+    Rejects 5/9-digit integers (ZIP codes) and zero."""
+    t = tok.replace(",", "").strip()
+    if not t or not re.fullmatch(r"-?\d+(\.\d+)?", t):
+        return None
+    if "." not in t and _ZIP_RE.match(t):
+        return None
+    try:
+        val = float(t)
+    except ValueError:
+        return None
+    if abs(val) < 0.01:
+        return None
+    return val
+
+
+def _best_amount(row: List[str]) -> Optional[float]:
+    """Scan backwards — transaction amount is typically in a late field,
+    after name/address/city/state/zip. Prefers tokens with decimal points."""
+    # First pass: decimal-containing amounts (almost certainly money).
+    for tok in reversed(row):
+        t = (tok or "").replace(",", "").strip()
+        if "." in t:
+            val = _looks_like_amount(tok)
+            if val is not None:
+                return val
+    # Second pass: any amount-shaped token (skipping ZIPs).
+    for tok in reversed(row):
+        val = _looks_like_amount(tok)
+        if val is not None:
+            return val
+    return None
+
+
+def _first_date(row: List[str]) -> Optional[date]:
+    for tok in row:
+        d = _parse_mmddyyyy(tok)
+        if d:
+            return d
+    return None
+
+
+def _first_name_like(row: List[str]) -> Optional[str]:
+    """First long alphabetic token past the record-type/committee-id slots."""
+    for i in range(2, min(len(row), 15)):
+        token = (row[i] or "").strip()
+        if not token or len(token) <= 3:
+            continue
+        if not re.search(r"[A-Za-z]", token):
+            continue
+        if _parse_mmddyyyy(token):
+            continue
+        if re.fullmatch(r"[A-Z]{2}", token):  # state code
+            continue
+        return token
+    return None
+
+
+def _extract_sa_fields_positional(row: List[str]) -> dict:
+    """
+    Extract SA fields heuristically from a raw pipe-delimited row.
+    Finds the first parseable date and the first reasonable amount.
+    Contributor name is taken from the first long non-numeric field
+    after the filer committee id (position 1-2 typically).
+    """
+    contribution_date = _first_date(row)
+    amount = _best_amount(row)
+    contributor_name = _first_name_like(row)
+
+    return {
+        "contributor_name": contributor_name,
+        "contributor_employer": None,
+        "contributor_occupation": None,
+        "contribution_amount": amount,
+        "contribution_date": contribution_date,
+        "receipt_description": None,
+        "contributor_type": None,
+        "memo_text": None,
+    }
+
+
+def _extract_sb_fields_positional(row: List[str]) -> dict:
+    """
+    Extract SB fields heuristically from a raw pipe-delimited row.
+    Same approach as SA: first parseable date, first reasonable amount,
+    first long alphabetic token as payee name.
+    """
+    disbursement_date = _first_date(row)
+    amount = _best_amount(row)
+    payee_name = _first_name_like(row)
+
+    return {
+        "payee_name": payee_name,
+        "payee_employer": None,
+        "payee_occupation": None,
+        "disbursement_amount": amount,
+        "disbursement_date": disbursement_date,
+        "disbursement_description": None,
+        "payee_type": None,
+        "purpose": None,
+        "category_code": None,
+        "memo_text": None,
+        "beneficiary_candidate_id": None,
+        "beneficiary_candidate_name": None,
+    }
 
 
 def _parse_date_flexible(s: str) -> Optional[date]:
